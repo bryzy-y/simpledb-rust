@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.100"
+bytemuck = { version = "1.24.0", features = ["derive", "min_const_generics"] }
 chrono = "0.4.42"
 parking_lot = { version = "0.12.5", features = ["arc_lock"] }
 

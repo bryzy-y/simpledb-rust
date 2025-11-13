@@ -119,9 +119,8 @@ impl DiskManager {
                 .open(path)?;
 
             // Initialize the database file
-            db_file.set_len(
-                (config::DEFAULT_DB_FILE_SIZE as u64 + 1) * config::SIMPLEDB_PAGE_SIZE as u64,
-            )?;
+            db_file
+                .set_len((config::DEFAULT_DB_FILE_SIZE as u64 + 1) * config::PAGE_SIZE as u64)?;
 
             Ok(Self {
                 stats: Stats::default(),
@@ -212,9 +211,7 @@ impl DiskManager {
             self.db_header.page_capacity *= 2;
 
             self.db_io
-                .set_len(
-                    (self.db_header.page_capacity as u64 + 1) * config::SIMPLEDB_PAGE_SIZE as u64,
-                )
+                .set_len((self.db_header.page_capacity as u64 + 1) * config::PAGE_SIZE as u64)
                 .context("Failed to resize database")?;
 
             // Write updated header to disk
@@ -224,7 +221,7 @@ impl DiskManager {
             self.db_io.sync_all()?;
         }
 
-        return Ok(self.pages.len() * config::SIMPLEDB_PAGE_SIZE as usize);
+        return Ok(self.pages.len() * config::PAGE_SIZE as usize);
     }
 }
 
@@ -303,35 +300,32 @@ mod tests {
     }
 
     #[test]
-    fn test_create_disk_manager() -> Result<()> {
+    fn test_disk_manager_read_write() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let db_path = temp_dir.path().join("simpledb.db");
 
-        let disk_manager = DiskManager::new(&db_path)?;
-
-        assert_eq!(
-            disk_manager.db_header.page_capacity,
-            config::DEFAULT_DB_FILE_SIZE
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_read_write_page() -> Result<()> {
-        let temp_dir = tempfile::tempdir()?;
-        let db_path = temp_dir.path().join("simpledb.db");
+        let mut buf = [0u8; config::PAGE_SIZE as usize];
+        let mut data = [0u8; config::PAGE_SIZE as usize];
 
         let mut disk_manager = DiskManager::new(&db_path)?;
 
-        let page_id = 0;
-        let write_data = vec![1u8; config::SIMPLEDB_PAGE_SIZE as usize];
-        disk_manager.write(page_id, &write_data)?;
+        let mut cursor = io::Cursor::new(&mut data[..]);
+        cursor.write_all(b"Test string.").unwrap();
 
-        let mut read_data = vec![0u8; config::SIMPLEDB_PAGE_SIZE as usize];
-        disk_manager.read(page_id, &mut read_data)?;
+        // Check empty read
+        disk_manager.read(0, &mut buf[..])?;
 
-        assert_eq!(write_data, read_data);
+        disk_manager.write(0, &data[..])?;
+        disk_manager.read(0, &mut buf[..])?;
+
+        assert_eq!(&buf, &data);
+
+        buf.fill(0);
+
+        disk_manager.write(5, &data[..])?;
+        disk_manager.read(5, &mut buf[..])?;
+
+        assert_eq!(&buf, &data);
 
         Ok(())
     }
@@ -349,7 +343,7 @@ mod tests {
         );
 
         // Now allocate pages until we exceed capacity
-        let bytes = vec![255u8; config::SIMPLEDB_PAGE_SIZE as usize];
+        let bytes = vec![255u8; config::PAGE_SIZE as usize];
         for page in 0..(config::DEFAULT_DB_FILE_SIZE + 1) {
             disk_manager.write(page as usize, &bytes)?
         }
@@ -369,21 +363,40 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_page() -> Result<()> {
+    fn test_disk_manager_delete() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let db_path = temp_dir.path().join("simpledb.db");
 
+        let mut buf = [0u8; config::PAGE_SIZE as usize];
+        let mut data = [0u8; config::PAGE_SIZE as usize];
         let mut disk_manager = DiskManager::new(&db_path)?;
+        let init_size = disk_manager.file_size()?;
 
-        let page_id = 0;
-        let write_data = vec![1u8; config::SIMPLEDB_PAGE_SIZE as usize];
-        disk_manager.write(page_id, &write_data)?;
+        let mut cursor = io::Cursor::new(&mut data[..]);
+        cursor.write_all(b"Test string.")?;
 
-        disk_manager.delete_page(page_id)?;
+        let mut pages_to_write = 100;
+        for page_id in 0..pages_to_write {
+            disk_manager.write(page_id, &data)?;
+            disk_manager.read(page_id, &mut buf)?;
+            assert_eq!(&buf, &data);
+        }
 
-        // Reallocate the same page
-        let new_page_id = disk_manager.allocate_page()?;
-        assert_eq!(new_page_id, page_id);
+        let size_after_write = disk_manager.file_size()?;
+        assert!(size_after_write > init_size);
+
+        pages_to_write *= 2;
+        for page_id in 0..pages_to_write {
+            disk_manager.write(page_id, &data)?;
+            disk_manager.read(page_id, &mut buf)?;
+            assert_eq!(&buf, &data);
+
+            disk_manager.delete_page(page_id)?;
+        }
+
+        // expect no change in file size after delete because we're reclaiming space
+        let size_after_delete = disk_manager.file_size()?;
+        assert_eq!(size_after_delete, size_after_write);
 
         Ok(())
     }

@@ -27,7 +27,7 @@ impl Frame {
             frame_id,
             is_dirty: false,
             pin_count: AtomicU64::new(0),
-            data: vec![0u8; config::SIMPLEDB_PAGE_SIZE as usize],
+            data: vec![0u8; config::PAGE_SIZE as usize],
         }
     }
 
@@ -297,7 +297,7 @@ mod tests {
             let read_page = pool.get_page(1).unwrap();
             let data = read_page.data();
 
-            assert_eq!(data, &[0u8; config::SIMPLEDB_PAGE_SIZE as usize]);
+            assert_eq!(data, &[0u8; config::PAGE_SIZE as usize]);
         });
 
         let manager_2 = manager.clone();
