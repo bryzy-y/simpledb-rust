@@ -1,10 +1,7 @@
-use crate::{
-    config,
-    storage::{
-        disk::{DiskRequest, DiskScheduler},
-        page::{ReadPageGuard, WritePageGuard},
-        replacer::LRUKReplacer,
-    },
+use crate::storage::{
+    disk::{DiskRequest, DiskScheduler},
+    page::{Page, Pager, ReadPageGuard, WritePageGuard},
+    replacer::LRUKReplacer,
 };
 use parking_lot::{Mutex, MutexGuard, RwLock};
 use std::{
@@ -12,12 +9,14 @@ use std::{
     sync::{Arc, atomic::AtomicU64},
 };
 
+// Trait for buffer pool manager operations needed by database components
+
 pub struct Frame {
     pub page_id: Option<usize>,
     pub frame_id: usize,
     pub is_dirty: bool,
     pub pin_count: AtomicU64,
-    pub data: Vec<u8>,
+    pub page: Page,
 }
 
 impl Frame {
@@ -27,7 +26,7 @@ impl Frame {
             frame_id,
             is_dirty: false,
             pin_count: AtomicU64::new(0),
-            data: vec![0u8; config::PAGE_SIZE as usize],
+            page: Page::new(),
         }
     }
 
@@ -35,7 +34,7 @@ impl Frame {
         self.page_id = None;
         self.is_dirty = false;
         self.pin_count.store(0, std::sync::atomic::Ordering::SeqCst);
-        self.data.fill(0);
+        self.page.data_mut().fill(0);
     }
 }
 
@@ -245,7 +244,7 @@ impl BufferPoolManager {
                 if !(*frame_ptr).is_dirty {
                     return true;
                 }
-                let write_request = DiskRequest::WriteUnsafe(&(*frame_ptr).data);
+                let write_request = DiskRequest::WriteUnsafe((*frame_ptr).page.data());
                 self.disk_scheduler.schedule(write_request).ok();
             }
             return true;
@@ -262,7 +261,7 @@ impl BufferPoolManager {
                 if !(*frame_ptr).is_dirty {
                     continue;
                 }
-                let write_request = DiskRequest::WriteUnsafe(&(*frame_ptr).data);
+                let write_request = DiskRequest::WriteUnsafe((*frame_ptr).page.data());
                 self.disk_scheduler.schedule(write_request).ok();
             }
         }
@@ -274,10 +273,28 @@ impl BufferPoolManager {
     }
 }
 
+impl Pager for BufferPoolManager {
+    type ReadGuard<'a> = ReadPageGuard<'a>;
+    type WriteGuard<'a> = WritePageGuard<'a>;
+
+    fn new_page(&self) -> usize {
+        self.new_page()
+    }
+
+    fn get_page(&self, page_id: usize) -> Option<Self::ReadGuard<'_>> {
+        self.get_page(page_id)
+    }
+
+    fn get_page_mut(&self, page_id: usize) -> Option<Self::WriteGuard<'_>> {
+        self.get_page_mut(page_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{io::Write, path::Path, thread};
 
+    use crate::config;
     use crate::storage::disk;
 
     use super::*;

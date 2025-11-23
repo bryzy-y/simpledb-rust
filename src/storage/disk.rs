@@ -54,7 +54,7 @@ pub enum DiskRequest {
         page_id: usize,
         frame: Arc<RwLock<Frame>>,
     },
-    WriteUnsafe(*const Vec<u8>),
+    WriteUnsafe(*const [u8]),
     Delete(usize),
 }
 
@@ -248,14 +248,14 @@ impl DiskScheduler {
                     DiskRequest::Read { page_id, frame } => {
                         let mut guard = frame.write();
 
-                        if let Err(e) = disk_manager.read(page_id, guard.data.as_mut_slice()) {
+                        if let Err(e) = disk_manager.read(page_id, guard.page.data_mut()) {
                             eprintln!("Disk read error for page {}: {}", page_id, e);
                             return;
                         }
                     }
                     DiskRequest::Write { page_id, frame } => {
                         let frame = frame.read();
-                        if let Err(e) = disk_manager.write(page_id, frame.data.as_slice()) {
+                        if let Err(e) = disk_manager.write(page_id, frame.page.data()) {
                             eprintln!("Disk write error for page {}: {}", page_id, e);
                         }
                     }
@@ -266,7 +266,7 @@ impl DiskScheduler {
                     }
                     DiskRequest::WriteUnsafe(ptr) => {
                         let data = unsafe { &*ptr };
-                        if let Err(e) = disk_manager.write(0, data.as_slice()) {
+                        if let Err(e) = disk_manager.write(0, data) {
                             eprintln!("Disk unsafe write error: {}", e);
                         }
                     }
