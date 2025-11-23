@@ -2,7 +2,7 @@ use std::borrow::{Borrow, BorrowMut};
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::storage::page::Page;
+use crate::{storage::page::Page, types::PageID};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)] // We need it to be u32, because padding.
@@ -75,8 +75,6 @@ impl<'a> From<&'a mut Page> for &'a mut PageHeader {
         bytemuck::from_bytes_mut(header_bytes)
     }
 }
-
-pub type PageID = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RID {

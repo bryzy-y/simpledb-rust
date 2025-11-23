@@ -1,7 +1,10 @@
-use crate::storage::{
-    disk::{DiskRequest, DiskScheduler},
-    page::{Page, Pager, ReadPageGuard, WritePageGuard},
-    replacer::LRUKReplacer,
+use crate::{
+    storage::{
+        disk::{DiskRequest, DiskScheduler},
+        page::{Page, Pager, ReadPageGuard, WritePageGuard},
+        replacer::LRUKReplacer,
+    },
+    types::PageID,
 };
 use parking_lot::{Mutex, MutexGuard, RwLock};
 use std::{
@@ -9,10 +12,8 @@ use std::{
     sync::{Arc, atomic::AtomicU64},
 };
 
-// Trait for buffer pool manager operations needed by database components
-
 pub struct Frame {
-    pub page_id: Option<usize>,
+    pub page_id: Option<PageID>,
     pub frame_id: usize,
     pub is_dirty: bool,
     pub pin_count: AtomicU64,
@@ -70,7 +71,7 @@ impl PoolState {
     }
 }
 
-pub struct BufferPoolManager {
+pub struct BufferPool {
     state: Mutex<PoolState>,
     replacer: Mutex<LRUKReplacer>,
     disk_scheduler: DiskScheduler,
@@ -78,7 +79,7 @@ pub struct BufferPoolManager {
     pool_size: usize,
 }
 
-impl BufferPoolManager {
+impl BufferPool {
     pub fn new(disk_scheduler: DiskScheduler, pool_size: usize) -> Self {
         let replacer = Mutex::new(LRUKReplacer::new(pool_size, 2));
         let state = Mutex::new(PoolState::new(pool_size));
@@ -93,7 +94,7 @@ impl BufferPoolManager {
         }
     }
 
-    fn read_from_disk(&self, state: &PoolStateGuard<'_>, page_id: usize, frame_id: usize) {
+    fn read_from_disk(&self, state: &PoolStateGuard<'_>, page_id: PageID, frame_id: usize) {
         let frame = state.frames[frame_id].clone();
         let read_request = DiskRequest::Read { page_id, frame };
         self.disk_scheduler.schedule(read_request).ok();
@@ -102,10 +103,10 @@ impl BufferPoolManager {
     fn get_frame(
         &self,
         mut state: PoolStateGuard<'_>,
-        page_id: usize,
+        page_id: PageID,
     ) -> Option<Arc<RwLock<Frame>>> {
         // Check if page is already in buffer pool
-        if let Some(&frame_id) = state.page_table.get(&page_id) {
+        if let Some(&frame_id) = state.page_table.get(&page_id.as_usize()) {
             let frame = state.frames[frame_id].clone();
             return Some(frame);
         }
@@ -119,7 +120,7 @@ impl BufferPoolManager {
             {
                 state.frames[frame_id].write().page_id = Some(page_id);
             }
-            state.page_table.insert(page_id, frame_id);
+            state.page_table.insert(page_id.as_usize(), frame_id);
             let frame = state.frames[frame_id].clone();
 
             return Some(frame);
@@ -148,8 +149,8 @@ impl BufferPoolManager {
                 // Can hold the write lock briefly here, since no one else can access this frame
                 state.frames[frame_id].write().page_id = Some(page_id);
             }
-            state.page_table.remove(&old_page_id);
-            state.page_table.insert(page_id, frame_id);
+            state.page_table.remove(&old_page_id.as_usize());
+            state.page_table.insert(page_id.as_usize(), frame_id);
 
             return Some(state.frames[frame_id].clone());
         }
@@ -157,9 +158,11 @@ impl BufferPoolManager {
         None
     }
 
-    pub fn new_page(&self) -> usize {
-        self.next_page_id
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst) as usize
+    pub fn new_page(&self) -> PageID {
+        PageID::new(
+            self.next_page_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst) as u32,
+        )
     }
 
     pub fn size(&self) -> usize {
@@ -167,23 +170,23 @@ impl BufferPoolManager {
     }
 
     // Must get a read only page.
-    pub fn get_page(&self, page_id: usize) -> Option<ReadPageGuard<'_>> {
+    pub fn get_page(&self, page_id: PageID) -> Option<ReadPageGuard<'_>> {
         let state = self.state.lock();
         self.get_frame(state, page_id)
             .map(|frame| ReadPageGuard::new(frame, &self.replacer))
     }
 
     // Must get a mutable page
-    pub fn get_page_mut(&self, page_id: usize) -> Option<WritePageGuard<'_>> {
+    pub fn get_page_mut(&self, page_id: PageID) -> Option<WritePageGuard<'_>> {
         let state = self.state.lock();
         self.get_frame(state, page_id)
             .map(|frame| WritePageGuard::new(frame, &self.replacer, &self.disk_scheduler))
     }
 
-    pub fn delete(&self, page_id: usize) -> bool {
+    pub fn delete(&self, page_id: PageID) -> bool {
         let mut state = self.state.lock();
 
-        if let Some(&frame_id) = state.page_table.get(&page_id) {
+        if let Some(&frame_id) = state.page_table.get(&page_id.as_usize()) {
             let frame = state.frames[frame_id].clone();
             let pin_count = frame
                 .read()
@@ -204,7 +207,7 @@ impl BufferPoolManager {
             }
 
             // Remove from page table and back to free list
-            state.page_table.remove(&page_id);
+            state.page_table.remove(&page_id.as_usize());
             // Add frame back to free list
             state.free_list.push(frame_id);
             // Finally remove from disk
@@ -217,7 +220,7 @@ impl BufferPoolManager {
         true
     }
 
-    pub fn flush(&self, page_id: usize) -> bool {
+    pub fn flush(&self, page_id: PageID) -> bool {
         let page = self.get_page_mut(page_id);
         if let Some(mut page) = page {
             page.flush();
@@ -235,9 +238,9 @@ impl BufferPoolManager {
         }
     }
 
-    pub fn flush_unsafe(&self, page_id: usize) -> bool {
+    pub fn flush_unsafe(&self, page_id: PageID) -> bool {
         let state = self.state.lock();
-        if let Some(&frame_id) = state.page_table.get(&page_id) {
+        if let Some(&frame_id) = state.page_table.get(&page_id.as_usize()) {
             unsafe {
                 let frame_ptr = state.frames[frame_id].data_ptr();
                 // Let's avoid flushing if not dirty
@@ -267,25 +270,25 @@ impl BufferPoolManager {
         }
     }
 
-    pub fn pin_count(&self, page_id: usize) -> Option<u64> {
+    pub fn pin_count(&self, page_id: PageID) -> Option<u64> {
         let page = self.get_page(page_id);
         page.map(|p| p.pin_count())
     }
 }
 
-impl Pager for BufferPoolManager {
+impl Pager for BufferPool {
     type ReadGuard<'a> = ReadPageGuard<'a>;
     type WriteGuard<'a> = WritePageGuard<'a>;
 
-    fn new_page(&self) -> usize {
+    fn new_page(&self) -> PageID {
         self.new_page()
     }
 
-    fn get_page(&self, page_id: usize) -> Option<Self::ReadGuard<'_>> {
+    fn get_page(&self, page_id: PageID) -> Option<Self::ReadGuard<'_>> {
         self.get_page(page_id)
     }
 
-    fn get_page_mut(&self, page_id: usize) -> Option<Self::WriteGuard<'_>> {
+    fn get_page_mut(&self, page_id: PageID) -> Option<Self::WriteGuard<'_>> {
         self.get_page_mut(page_id)
     }
 }
@@ -305,13 +308,13 @@ mod tests {
     fn test_buffer_pool_manager() {
         let disk_manager = disk::DiskManager::new(Path::new(PATH)).unwrap();
         let disk_scheduler = disk::DiskScheduler::new(disk_manager);
-        let manager = Arc::new(BufferPoolManager::new(disk_scheduler, 10));
+        let manager = Arc::new(BufferPool::new(disk_scheduler, 10));
 
         let manager_1 = manager.clone();
         let handle_1 = thread::spawn(move || {
             let pool = manager_1;
 
-            let read_page = pool.get_page(1).unwrap();
+            let read_page = pool.get_page(PageID::from(1u32)).unwrap();
             let data = read_page.data();
 
             assert_eq!(data, &[0u8; config::PAGE_SIZE as usize]);
@@ -322,14 +325,14 @@ mod tests {
             let pool = manager_2;
 
             {
-                let mut write_page = pool.get_page_mut(2).unwrap();
+                let mut write_page = pool.get_page_mut(PageID::from(2u32)).unwrap();
                 let mut data = write_page.data();
 
                 data.write(b"Hello World").unwrap();
             }
 
             {
-                let read_page = pool.get_page(2).unwrap();
+                let read_page = pool.get_page(PageID::from(2u32)).unwrap();
                 let data = read_page.data();
 
                 assert_eq!(&data[0..11], b"Hello World");

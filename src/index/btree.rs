@@ -1,54 +1,8 @@
-use std::fmt::Debug;
-
 use crate::{
-    index::btree_nodes::{BtreeNode, InternalNode, LeafNode, PageHeader, PageID, RID},
+    index::btree_nodes::{BtreeNode, InternalNode, LeafNode, PageHeader, RID},
     storage::page::{Guard, GuardMut, Pager},
+    types::{PageID, TypeID, Value},
 };
-
-#[derive(Debug, Clone, Copy)]
-pub enum TypeID {
-    Int,
-    BigInt,
-}
-
-impl TypeID {
-    fn size(&self) -> usize {
-        match self {
-            TypeID::Int => 4,
-            TypeID::BigInt => 8,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum Value {
-    Int(i32),
-    BigInt(i64),
-}
-
-impl Value {
-    fn serialize(&self, buf: &mut [u8]) {
-        match self {
-            Value::Int(v) => buf[..4].copy_from_slice(&v.to_le_bytes()),
-            Value::BigInt(v) => buf[..8].copy_from_slice(&v.to_le_bytes()),
-        }
-    }
-
-    fn deserialize(type_id: TypeID, buf: &[u8]) -> Self {
-        match type_id {
-            TypeID::Int => Value::Int(i32::from_le_bytes(buf[..4].try_into().unwrap())),
-            TypeID::BigInt => Value::BigInt(i64::from_le_bytes(buf[..8].try_into().unwrap())),
-        }
-    }
-
-    fn compare(&self, other: &Value) -> std::cmp::Ordering {
-        match (self, other) {
-            (Value::Int(a), Value::Int(b)) => a.cmp(b),
-            (Value::BigInt(a), Value::BigInt(b)) => a.cmp(b),
-            _ => panic!("Cannot compare different Value types"),
-        }
-    }
-}
 
 fn cell_key(type_id: TypeID, cell: &[u8]) -> Value {
     Value::deserialize(type_id, cell)
@@ -99,7 +53,7 @@ impl<P: Pager> Btree<P> {
     }
 
     pub fn is_empty(&self) -> bool {
-        let guard = self.pager.get_page(self.root_page_id as usize).unwrap();
+        let guard = self.pager.get_page(self.root_page_id).unwrap();
         let header: &PageHeader = guard.page().into();
         header.cells() == 0
     }
@@ -110,7 +64,7 @@ impl<P: Pager> Btree<P> {
 
         loop {
             // We have to figure out how to sleep here
-            let guard = self.pager.get_page(page_id as usize).unwrap();
+            let guard = self.pager.get_page(page_id).unwrap();
             let current_node: BtreeNode<_> = guard.page().into();
 
             match current_node {
@@ -146,7 +100,7 @@ impl<P: Pager> Btree<P> {
         let mut page_id = self.root_page_id;
 
         let leaf_page_id = loop {
-            let guard = self.pager.get_page(page_id as usize).unwrap();
+            let guard = self.pager.get_page(page_id).unwrap();
             let current_node: BtreeNode<_> = guard.page().into();
 
             match current_node {
@@ -165,7 +119,7 @@ impl<P: Pager> Btree<P> {
                 BtreeNode::Invalid(_) => {
                     // We need to request a write lock and initialize this page
                     drop(guard); // Release read lock
-                    let mut guard = self.pager.get_page_mut(page_id as usize).unwrap();
+                    let mut guard = self.pager.get_page_mut(page_id).unwrap();
                     LeafNode::init(
                         guard.page_mut(),
                         self.max_cells_per_page as u32,
@@ -175,7 +129,7 @@ impl<P: Pager> Btree<P> {
                 }
             }
         };
-        let mut guard = self.pager.get_page_mut(leaf_page_id as usize).unwrap();
+        let mut guard = self.pager.get_page_mut(leaf_page_id).unwrap();
         let mut leaf = LeafNode::new(guard.page_mut());
 
         // Check for duplicate keys
@@ -202,7 +156,7 @@ impl<P: Pager> Btree<P> {
         }
         // Overflow occurs, we need to split the page and propagate the split upwards
         let mut new_page_id = self.pager.new_page() as PageID;
-        let mut guard = self.pager.get_page_mut(new_page_id as usize).unwrap();
+        let mut guard = self.pager.get_page_mut(new_page_id).unwrap();
 
         let mut new_leaf = LeafNode::init(
             guard.page_mut(),
@@ -219,7 +173,7 @@ impl<P: Pager> Btree<P> {
         while let Some(parent_page_id) = parent_page_ids.pop() {
             // Try insert into an internal page
             // If overflow occurs, split, get a new key and page link to insert into the next parent
-            let mut guard = self.pager.get_page_mut(parent_page_id as usize).unwrap();
+            let mut guard = self.pager.get_page_mut(parent_page_id).unwrap();
             let mut parent = InternalNode::new(guard.page_mut());
             let insert_idx =
                 parent.bisect_right(|cell| cell_key(self.key_type, cell).compare(&middle_key));
@@ -227,7 +181,7 @@ impl<P: Pager> Btree<P> {
             // Check if internal node is full before inserting
             if parent.is_full() {
                 let new_internal_id = self.pager.new_page() as PageID;
-                let mut guard = self.pager.get_page_mut(new_internal_id as usize).unwrap();
+                let mut guard = self.pager.get_page_mut(new_internal_id).unwrap();
 
                 let mut new_internal = InternalNode::init(
                     guard.page_mut(),
@@ -270,7 +224,7 @@ impl<P: Pager> Btree<P> {
         }
         // If we reach here, we have split the root and need to create a new root
         let new_root_id = self.pager.new_page() as PageID;
-        let mut guard = self.pager.get_page_mut(new_root_id as usize).unwrap();
+        let mut guard = self.pager.get_page_mut(new_root_id).unwrap();
 
         let mut new_root = InternalNode::init(
             guard.page_mut(),
@@ -306,9 +260,9 @@ mod tests {
         let mut btree = Btree::new(TypeID::Int, bpm, 10);
 
         // Insert 3 values (far below the max of 10)
-        let rid1 = RID::new(1, 10);
-        let rid2 = RID::new(2, 20);
-        let rid3 = RID::new(3, 30);
+        let rid1 = RID::new(PageID::from(1u32), 10);
+        let rid2 = RID::new(PageID::from(2u32), 20);
+        let rid3 = RID::new(PageID::from(3u32), 30);
 
         btree.insert(Value::Int(100), rid1);
         btree.insert(Value::Int(50), rid2); // Insert out of order
@@ -320,7 +274,7 @@ mod tests {
         assert_eq!(btree.search(&Value::Int(150)), Some(rid3));
 
         // Verify leaf page state: should have 3 cells, still a leaf, not split
-        let root_guard = btree.pager.get_page(btree.root_page_id as usize).unwrap();
+        let root_guard = btree.pager.get_page(btree.root_page_id).unwrap();
         let header: &PageHeader = root_guard.page().into();
 
         assert_eq!(header.cells(), 3, "Leaf should have 3 cells");
@@ -339,14 +293,14 @@ mod tests {
         // Insert enough to trigger a split (max_cells + 1)
         for i in 0..=max_cells {
             let key = (i * 10) as i32;
-            let rid = RID::new(i as u32, i as u16);
+            let rid = RID::new(PageID::from(i as u32), i as u16);
             btree.insert(Value::Int(key), rid);
         }
 
         // Verify all keys can be found
         for i in 0..=max_cells {
             let key = (i * 10) as i32;
-            let rid = RID::new(i as u32, i as u16);
+            let rid = RID::new(PageID::from(i as u32), i as u16);
             assert_eq!(
                 btree.search(&Value::Int(key)),
                 Some(rid),
@@ -356,7 +310,7 @@ mod tests {
         }
 
         // Verify root is now internal
-        let root_guard = btree.pager.get_page(btree.root_page_id as usize).unwrap();
+        let root_guard = btree.pager.get_page(btree.root_page_id).unwrap();
         let header: &PageHeader = root_guard.page().into();
 
         assert!(!header.is_leaf(), "Root should be internal after split");
@@ -381,7 +335,10 @@ mod tests {
 
         // First, create a tree with internal node by filling first leaf
         for i in 0..=max_cells {
-            btree.insert(Value::Int((i * 10) as i32), RID::new(i as u32, i as u16));
+            btree.insert(
+                Value::Int((i * 10) as i32),
+                RID::new(PageID::from(i as u32), i as u16),
+            );
         }
 
         // At this point: root is internal with 2 children (each leaf has ~half the cells)
@@ -389,13 +346,16 @@ mod tests {
         // Now insert more keys to split one of the leaves again
         // This should add another entry to the internal node without splitting it
         for i in (max_cells + 1)..(max_cells * 2) {
-            btree.insert(Value::Int((i * 10) as i32), RID::new(i as u32, i as u16));
+            btree.insert(
+                Value::Int((i * 10) as i32),
+                RID::new(PageID::from(i as u32), i as u16),
+            );
         }
 
         // Verify all keys can be found
         for i in 0..(max_cells * 2) {
             let key = (i * 10) as i32;
-            let rid = RID::new(i as u32, i as u16);
+            let rid = RID::new(PageID::from(i as u32), i as u16);
             assert_eq!(
                 btree.search(&Value::Int(key)),
                 Some(rid),
@@ -405,7 +365,7 @@ mod tests {
         }
 
         // Verify root is still internal and has more than 2 children
-        let root_guard = btree.pager.get_page(btree.root_page_id as usize).unwrap();
+        let root_guard = btree.pager.get_page(btree.root_page_id).unwrap();
         let header: &PageHeader = root_guard.page().into();
 
         assert!(!header.is_leaf(), "Root should still be internal");
@@ -429,14 +389,14 @@ mod tests {
 
         for i in 0..num_inserts {
             let key = (i * 10) as i32;
-            let rid = RID::new(i as u32, i as u16);
+            let rid = RID::new(PageID::from(i as u32), i as u16);
             btree.insert(Value::Int(key), rid);
         }
 
         // Verify all keys can be found
         for i in 0..num_inserts {
             let key = (i * 10) as i32;
-            let rid = RID::new(i as u32, i as u16);
+            let rid = RID::new(PageID::from(i as u32), i as u16);
             assert_eq!(
                 btree.search(&Value::Int(key)),
                 Some(rid),
@@ -446,7 +406,7 @@ mod tests {
         }
 
         // Verify root is internal
-        let root_guard = btree.pager.get_page(btree.root_page_id as usize).unwrap();
+        let root_guard = btree.pager.get_page(btree.root_page_id).unwrap();
         let header: &PageHeader = root_guard.page().into();
 
         assert!(
@@ -475,14 +435,14 @@ mod tests {
         // Insert in reverse order
         for i in (0..num_keys).rev() {
             let key = (i * 10) as i32;
-            let rid = RID::new(i as u32, i as u16);
+            let rid = RID::new(PageID::from(i as u32), i as u16);
             btree.insert(Value::Int(key), rid);
         }
 
         // Verify all keys can be found
         for i in 0..num_keys {
             let key = (i * 10) as i32;
-            let rid = RID::new(i as u32, i as u16);
+            let rid = RID::new(PageID::from(i as u32), i as u16);
             assert_eq!(
                 btree.search(&Value::Int(key)),
                 Some(rid),
@@ -498,8 +458,8 @@ mod tests {
         let bpm = MockBufferPoolManager::new();
         let mut btree = Btree::new(TypeID::Int, bpm, 10);
 
-        let rid1 = RID::new(1, 10);
-        let rid2 = RID::new(2, 20);
+        let rid1 = RID::new(PageID::from(1u32), 10);
+        let rid2 = RID::new(PageID::from(2u32), 20);
 
         btree.insert(Value::Int(100), rid1);
         btree.insert(Value::Int(100), rid2); // Duplicate key
@@ -518,7 +478,10 @@ mod tests {
 
         // Insert some keys
         for i in 0..10 {
-            btree.insert(Value::Int((i * 20) as i32), RID::new(i, i as u16));
+            btree.insert(
+                Value::Int((i * 20) as i32),
+                RID::new(PageID::from(i as u32), i as u16),
+            );
         }
 
         // Search for keys in between

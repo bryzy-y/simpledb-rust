@@ -7,6 +7,7 @@ use crate::{
         disk::{DiskRequest, DiskScheduler},
         replacer::LRUKReplacer,
     },
+    types::PageID,
 };
 use parking_lot::{self, ArcRwLockReadGuard, ArcRwLockWriteGuard, Mutex, RawRwLock, RwLock};
 
@@ -18,9 +19,9 @@ pub trait Pager {
     where
         Self: 'a;
 
-    fn new_page(&self) -> usize;
-    fn get_page(&self, page_id: usize) -> Option<Self::ReadGuard<'_>>;
-    fn get_page_mut(&self, page_id: usize) -> Option<Self::WriteGuard<'_>>;
+    fn new_page(&self) -> PageID;
+    fn get_page(&self, page_id: PageID) -> Option<Self::ReadGuard<'_>>;
+    fn get_page_mut(&self, page_id: PageID) -> Option<Self::WriteGuard<'_>>;
 }
 
 pub trait Guard {
@@ -69,7 +70,7 @@ impl<'a> ReadPageGuard<'a> {
         &self.page_guard.page
     }
 
-    pub fn page_id(&self) -> Option<usize> {
+    pub fn page_id(&self) -> Option<PageID> {
         self.page_guard.page_id
     }
 
@@ -147,7 +148,7 @@ impl<'a> WritePageGuard<'a> {
         &mut self.page_guard.page
     }
 
-    pub fn page_id(&self) -> Option<usize> {
+    pub fn page_id(&self) -> Option<PageID> {
         self.page_guard.page_id
     }
 

@@ -8,6 +8,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SendError, SyncSender};
 
+use crate::types::PageID;
+
 use crate::config;
 use crate::storage::buffer::Frame;
 
@@ -47,15 +49,15 @@ pub struct DiskManager {
 
 pub enum DiskRequest {
     Read {
-        page_id: usize,
+        page_id: PageID,
         frame: Arc<RwLock<Frame>>,
     },
     Write {
-        page_id: usize,
+        page_id: PageID,
         frame: Arc<RwLock<Frame>>,
     },
     WriteUnsafe(*const [u8]),
-    Delete(usize),
+    Delete(PageID),
 }
 
 unsafe impl Send for DiskRequest {}
@@ -248,19 +250,20 @@ impl DiskScheduler {
                     DiskRequest::Read { page_id, frame } => {
                         let mut guard = frame.write();
 
-                        if let Err(e) = disk_manager.read(page_id, guard.page.data_mut()) {
+                        if let Err(e) = disk_manager.read(page_id.as_usize(), guard.page.data_mut())
+                        {
                             eprintln!("Disk read error for page {}: {}", page_id, e);
                             return;
                         }
                     }
                     DiskRequest::Write { page_id, frame } => {
                         let frame = frame.read();
-                        if let Err(e) = disk_manager.write(page_id, frame.page.data()) {
+                        if let Err(e) = disk_manager.write(page_id.as_usize(), frame.page.data()) {
                             eprintln!("Disk write error for page {}: {}", page_id, e);
                         }
                     }
                     DiskRequest::Delete(page_id) => {
-                        if let Err(e) = disk_manager.delete_page(page_id) {
+                        if let Err(e) = disk_manager.delete_page(page_id.as_usize()) {
                             eprintln!("Disk delete error for page {}: {}", page_id, e);
                         }
                     }

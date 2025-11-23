@@ -1,4 +1,7 @@
-use crate::storage::page::{Guard, GuardMut, Page, Pager};
+use crate::{
+    storage::page::{Guard, GuardMut, Page, Pager},
+    types::PageID,
+};
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::HashMap,
@@ -13,12 +16,12 @@ pub struct MockBufferPoolManager {
 }
 
 pub struct MockFrame {
-    pub page_id: usize,
+    pub page_id: PageID,
     pub page: Page,
 }
 
 impl MockFrame {
-    fn new(page_id: usize) -> Self {
+    fn new(page_id: PageID) -> Self {
         Self {
             page_id,
             page: Page::new(),
@@ -69,27 +72,28 @@ impl MockBufferPoolManager {
         }
     }
 
-    pub fn new_page(&self) -> usize {
-        let page_id = self
-            .next_page_id
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst) as usize;
+    pub fn new_page(&self) -> PageID {
+        let page_id = PageID::new(
+            self.next_page_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst) as u32,
+        );
 
         let frame = Arc::new(RwLock::new(MockFrame::new(page_id)));
-        self.pages.lock().insert(page_id, frame);
+        self.pages.lock().insert(page_id.as_usize(), frame);
 
         page_id
     }
 
-    pub fn get_page(&self, page_id: usize) -> Option<MockReadGuard> {
+    pub fn get_page(&self, page_id: PageID) -> Option<MockReadGuard> {
         let pages = self.pages.lock();
-        pages.get(&page_id).map(|frame| MockReadGuard {
+        pages.get(&page_id.as_usize()).map(|frame| MockReadGuard {
             frame: frame.clone(),
         })
     }
 
-    pub fn get_page_mut(&self, page_id: usize) -> Option<MockWriteGuard> {
+    pub fn get_page_mut(&self, page_id: PageID) -> Option<MockWriteGuard> {
         let pages = self.pages.lock();
-        pages.get(&page_id).map(|frame| MockWriteGuard {
+        pages.get(&page_id.as_usize()).map(|frame| MockWriteGuard {
             frame: frame.clone(),
         })
     }
@@ -114,15 +118,15 @@ impl Pager for MockBufferPoolManager {
     type ReadGuard<'a> = MockReadGuard;
     type WriteGuard<'a> = MockWriteGuard;
 
-    fn new_page(&self) -> usize {
+    fn new_page(&self) -> PageID {
         self.new_page()
     }
 
-    fn get_page(&self, page_id: usize) -> Option<Self::ReadGuard<'_>> {
+    fn get_page(&self, page_id: PageID) -> Option<Self::ReadGuard<'_>> {
         self.get_page(page_id)
     }
 
-    fn get_page_mut(&self, page_id: usize) -> Option<Self::WriteGuard<'_>> {
+    fn get_page_mut(&self, page_id: PageID) -> Option<Self::WriteGuard<'_>> {
         self.get_page_mut(page_id)
     }
 }
