@@ -1,6 +1,6 @@
 use crate::{
     storage::page::{Guard, GuardMut, Page, Pager},
-    types::PageID,
+    types::PageId,
 };
 use parking_lot::{Mutex, RwLock};
 use std::{
@@ -16,12 +16,12 @@ pub struct MockBufferPoolManager {
 }
 
 pub struct MockFrame {
-    pub page_id: PageID,
+    pub page_id: PageId,
     pub page: Page,
 }
 
 impl MockFrame {
-    fn new(page_id: PageID) -> Self {
+    fn new(page_id: PageId) -> Self {
         Self {
             page_id,
             page: Page::new(),
@@ -72,8 +72,8 @@ impl MockBufferPoolManager {
         }
     }
 
-    pub fn new_page(&self) -> PageID {
-        let page_id = PageID::new(
+    pub fn new_page(&self) -> PageId {
+        let page_id = PageId::new(
             self.next_page_id
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst) as u32,
         );
@@ -84,14 +84,14 @@ impl MockBufferPoolManager {
         page_id
     }
 
-    pub fn get_page(&self, page_id: PageID) -> Option<MockReadGuard> {
+    pub fn get_page(&self, page_id: PageId) -> Option<MockReadGuard> {
         let pages = self.pages.lock();
         pages.get(&page_id.as_usize()).map(|frame| MockReadGuard {
             frame: frame.clone(),
         })
     }
 
-    pub fn get_page_mut(&self, page_id: PageID) -> Option<MockWriteGuard> {
+    pub fn get_page_mut(&self, page_id: PageId) -> Option<MockWriteGuard> {
         let pages = self.pages.lock();
         pages.get(&page_id.as_usize()).map(|frame| MockWriteGuard {
             frame: frame.clone(),
@@ -118,15 +118,15 @@ impl Pager for MockBufferPoolManager {
     type ReadGuard<'a> = MockReadGuard;
     type WriteGuard<'a> = MockWriteGuard;
 
-    fn new_page(&self) -> PageID {
+    fn new_page(&self) -> PageId {
         self.new_page()
     }
 
-    fn get_page(&self, page_id: PageID) -> Option<Self::ReadGuard<'_>> {
+    fn get_page(&self, page_id: PageId) -> Option<Self::ReadGuard<'_>> {
         self.get_page(page_id)
     }
 
-    fn get_page_mut(&self, page_id: PageID) -> Option<Self::WriteGuard<'_>> {
+    fn get_page_mut(&self, page_id: PageId) -> Option<Self::WriteGuard<'_>> {
         self.get_page_mut(page_id)
     }
 }

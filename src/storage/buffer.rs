@@ -4,7 +4,7 @@ use crate::{
         page::{Page, Pager, ReadPageGuard, WritePageGuard},
         replacer::LRUKReplacer,
     },
-    types::PageID,
+    types::PageId,
 };
 use parking_lot::{Mutex, MutexGuard, RwLock};
 use std::{
@@ -13,7 +13,7 @@ use std::{
 };
 
 pub struct Frame {
-    pub page_id: Option<PageID>,
+    pub page_id: Option<PageId>,
     pub frame_id: usize,
     pub is_dirty: bool,
     pub pin_count: AtomicU64,
@@ -94,7 +94,7 @@ impl BufferPool {
         }
     }
 
-    fn read_from_disk(&self, state: &PoolStateGuard<'_>, page_id: PageID, frame_id: usize) {
+    fn read_from_disk(&self, state: &PoolStateGuard<'_>, page_id: PageId, frame_id: usize) {
         let frame = state.frames[frame_id].clone();
         let read_request = DiskRequest::Read { page_id, frame };
         self.disk_scheduler.schedule(read_request).ok();
@@ -103,7 +103,7 @@ impl BufferPool {
     fn get_frame(
         &self,
         mut state: PoolStateGuard<'_>,
-        page_id: PageID,
+        page_id: PageId,
     ) -> Option<Arc<RwLock<Frame>>> {
         // Check if page is already in buffer pool
         if let Some(&frame_id) = state.page_table.get(&page_id.as_usize()) {
@@ -158,8 +158,8 @@ impl BufferPool {
         None
     }
 
-    pub fn new_page(&self) -> PageID {
-        PageID::new(
+    pub fn new_page(&self) -> PageId {
+        PageId::new(
             self.next_page_id
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst) as u32,
         )
@@ -170,20 +170,20 @@ impl BufferPool {
     }
 
     // Must get a read only page.
-    pub fn get_page(&self, page_id: PageID) -> Option<ReadPageGuard<'_>> {
+    pub fn get_page(&self, page_id: PageId) -> Option<ReadPageGuard<'_>> {
         let state = self.state.lock();
         self.get_frame(state, page_id)
             .map(|frame| ReadPageGuard::new(frame, &self.replacer))
     }
 
     // Must get a mutable page
-    pub fn get_page_mut(&self, page_id: PageID) -> Option<WritePageGuard<'_>> {
+    pub fn get_page_mut(&self, page_id: PageId) -> Option<WritePageGuard<'_>> {
         let state = self.state.lock();
         self.get_frame(state, page_id)
             .map(|frame| WritePageGuard::new(frame, &self.replacer, &self.disk_scheduler))
     }
 
-    pub fn delete(&self, page_id: PageID) -> bool {
+    pub fn delete(&self, page_id: PageId) -> bool {
         let mut state = self.state.lock();
 
         if let Some(&frame_id) = state.page_table.get(&page_id.as_usize()) {
@@ -220,7 +220,7 @@ impl BufferPool {
         true
     }
 
-    pub fn flush(&self, page_id: PageID) -> bool {
+    pub fn flush(&self, page_id: PageId) -> bool {
         let page = self.get_page_mut(page_id);
         if let Some(mut page) = page {
             page.flush();
@@ -238,7 +238,7 @@ impl BufferPool {
         }
     }
 
-    pub fn flush_unsafe(&self, page_id: PageID) -> bool {
+    pub fn flush_unsafe(&self, page_id: PageId) -> bool {
         let state = self.state.lock();
         if let Some(&frame_id) = state.page_table.get(&page_id.as_usize()) {
             unsafe {
@@ -270,7 +270,7 @@ impl BufferPool {
         }
     }
 
-    pub fn pin_count(&self, page_id: PageID) -> Option<u64> {
+    pub fn pin_count(&self, page_id: PageId) -> Option<u64> {
         let page = self.get_page(page_id);
         page.map(|p| p.pin_count())
     }
@@ -280,15 +280,15 @@ impl Pager for BufferPool {
     type ReadGuard<'a> = ReadPageGuard<'a>;
     type WriteGuard<'a> = WritePageGuard<'a>;
 
-    fn new_page(&self) -> PageID {
+    fn new_page(&self) -> PageId {
         self.new_page()
     }
 
-    fn get_page(&self, page_id: PageID) -> Option<Self::ReadGuard<'_>> {
+    fn get_page(&self, page_id: PageId) -> Option<Self::ReadGuard<'_>> {
         self.get_page(page_id)
     }
 
-    fn get_page_mut(&self, page_id: PageID) -> Option<Self::WriteGuard<'_>> {
+    fn get_page_mut(&self, page_id: PageId) -> Option<Self::WriteGuard<'_>> {
         self.get_page_mut(page_id)
     }
 }
@@ -314,7 +314,7 @@ mod tests {
         let handle_1 = thread::spawn(move || {
             let pool = manager_1;
 
-            let read_page = pool.get_page(PageID::from(1u32)).unwrap();
+            let read_page = pool.get_page(PageId::from(1u32)).unwrap();
             let data = read_page.data();
 
             assert_eq!(data, &[0u8; config::PAGE_SIZE as usize]);
@@ -325,14 +325,14 @@ mod tests {
             let pool = manager_2;
 
             {
-                let mut write_page = pool.get_page_mut(PageID::from(2u32)).unwrap();
+                let mut write_page = pool.get_page_mut(PageId::from(2u32)).unwrap();
                 let mut data = write_page.data();
 
                 data.write(b"Hello World").unwrap();
             }
 
             {
-                let read_page = pool.get_page(PageID::from(2u32)).unwrap();
+                let read_page = pool.get_page(PageId::from(2u32)).unwrap();
                 let data = read_page.data();
 
                 assert_eq!(&data[0..11], b"Hello World");

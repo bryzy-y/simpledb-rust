@@ -1,9 +1,6 @@
 use bytemuck::{Pod, Zeroable};
 
-use crate::{
-    storage::page::Page,
-    types::{PageID, Value},
-};
+use crate::{storage::page::Page, types::PageId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)] // We need it to be u32, because padding.
@@ -32,8 +29,8 @@ impl PageHeader {
         }
     }
 
-    pub fn cell_size(&self) -> u32 {
-        self.cell_size
+    pub fn cell_size(&self) -> usize {
+        self.cell_size as usize
     }
 
     pub fn cells(&self) -> usize {
@@ -79,17 +76,17 @@ impl<'a> From<&'a mut Page> for &'a mut PageHeader {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RID {
-    page_id: PageID,
+    page_id: PageId,
     slot_num: u16,
 }
 
 impl RID {
-    pub fn new(page_id: PageID, slot_num: u16) -> Self {
+    pub fn new(page_id: PageId, slot_num: u16) -> Self {
         Self { page_id, slot_num }
     }
 
     pub fn deserialize(buf: &[u8]) -> Self {
-        let page_id = PageID::from_le_bytes(buf[..4].try_into().unwrap());
+        let page_id = PageId::from_le_bytes(buf[..4].try_into().unwrap());
         let slot_num = u16::from_le_bytes(buf[4..6].try_into().unwrap());
         Self { page_id, slot_num }
     }
@@ -113,8 +110,13 @@ pub struct Node<'a, T> {
     _marker: std::marker::PhantomData<T>,
 }
 
+trait CommonNodeOps {
+    fn page(&self) -> &Page;
+    fn base_header(&self) -> &PageHeader;
+}
+
 impl<'a, T> View<'a, T> {
-    pub fn new(page: &'a Page) -> Self {
+    fn new(page: &'a Page) -> Self {
         Self {
             page,
             _marker: std::marker::PhantomData,
@@ -141,6 +143,15 @@ impl<'a, T> View<'a, T> {
         keys_offset + header.cells() as usize * header.cell_size() as usize
     }
 
+    fn cell_at(&self, index: usize) -> Option<&'a [u8]> {
+        let cell_size = self.header().cell_size() as usize;
+
+        self.cell_offset(index).map(|off| {
+            let cell_data = &self.page.data()[off..off + cell_size];
+            cell_data
+        })
+    }
+
     pub fn is_full(&self) -> bool {
         let header = self.header();
         header.cells() >= header.max_cells()
@@ -155,16 +166,7 @@ impl<'a, T> View<'a, T> {
         self.header().is_leaf()
     }
 
-    pub fn cell_at(&self, index: usize) -> Option<&[u8]> {
-        let cell_size = self.header().cell_size() as usize;
-
-        self.cell_offset(index).map(|off| {
-            let cell_data = &self.page.data()[off..off + cell_size];
-            cell_data
-        })
-    }
-
-    pub fn bisect_right(&self, cmp: impl Fn(&[u8]) -> std::cmp::Ordering) -> usize {
+    pub fn bisect_right(&self, key: &[u8]) -> usize {
         let header = self.header();
 
         let (mut lo, mut hi) = match self.is_leaf() {
@@ -175,9 +177,10 @@ impl<'a, T> View<'a, T> {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let cell = self.cell_at(mid).unwrap();
+            let mid_key = &cell[..key.len()];
 
             // mid_key <= key
-            match cmp(cell) {
+            match mid_key.cmp(key) {
                 std::cmp::Ordering::Less | std::cmp::Ordering::Equal => {
                     lo = mid + 1;
                 }
@@ -206,7 +209,17 @@ impl<'a, T> Node<'a, T> {
         self.page.into()
     }
 
-    pub fn shift_right(&mut self, cell_index: usize) {
+    fn cell_at_mut(&mut self, index: usize) -> Option<&mut [u8]> {
+        let view = self.as_view();
+        let cell_size = view.header().cell_size() as usize;
+
+        view.cell_offset(index).map(|off| {
+            let cell_data = &mut self.page.data_mut()[off..off + cell_size];
+            cell_data
+        })
+    }
+
+    fn shift_right(&mut self, cell_index: usize) {
         let view = self.as_view();
         let offset = view.cell_offset(cell_index).unwrap();
         let cell_size = view.header().cell_size() as usize;
@@ -216,7 +229,7 @@ impl<'a, T> Node<'a, T> {
         data.copy_within(offset..end_offset, offset + cell_size);
     }
 
-    pub fn shift_left(&mut self, cell_index: usize) {
+    fn shift_left(&mut self, cell_index: usize) {
         let view = self.as_view();
         let offset = view.cell_offset(cell_index).unwrap();
         let cell_size = view.header().cell_size() as usize;
@@ -252,20 +265,17 @@ impl<'a, T> Node<'a, T> {
 
         mid_index
     }
-
-    pub fn insert_cell_at(&mut self, index: usize, init: impl Fn(&mut [u8])) {
-        // Make room for the new cell
-        self.shift_right(index);
-        // Initialize cell data using provided function
-        let cell_size = self.header_mut().cell_size() as usize;
-        let offset = self.as_view().cell_offset(index).unwrap();
-        let data = self.page.data_mut();
-        let cell_data = &mut data[offset..offset + cell_size];
-        init(cell_data);
-        // Update cell count
-        self.header_mut().incr_cells();
-    }
 }
+
+// What does Btree need from nodes:
+// - Initialize page as leaf or internal
+// - Insert key/value or key/page_id at index
+// - Get key/value or key/page_id at index
+// - Split node (move half to another node)
+// - Find index to insert key (bisect)
+// - Check if node is full
+// - Check if node is leaf or internal
+// - Delete key/value or key/page_id at index (shift left)
 
 impl<'a> Node<'a, Leaf> {
     pub fn init(page: &'a mut Page, max_cells: u32, cell_size: u32) -> Self {
@@ -279,6 +289,27 @@ impl<'a> Node<'a, Leaf> {
             page,
             _marker: std::marker::PhantomData,
         }
+    }
+
+    pub fn insert(&mut self, index: usize, key: &[u8], rid: RID) {
+        assert!(
+            key.len() + 6 == self.header_mut().cell_size(),
+            "Key size does not expected cell size"
+        );
+
+        self.shift_right(index);
+        // Initialize cell data using provided function
+        let cell_size = self.header_mut().cell_size() as usize;
+        let offset = self.as_view().cell_offset(index).unwrap();
+        let cell_data = &mut self.page.data_mut()[offset..offset + cell_size];
+
+        // Serialize key and rid into cell
+        cell_data[..key.len()].copy_from_slice(key);
+        rid.serialize(&mut cell_data[key.len()..key.len() + 6]);
+
+        // Update cell count
+        let header = self.header_mut();
+        header.cells += 1;
     }
 }
 
@@ -295,33 +326,58 @@ impl<'a> Node<'a, Internal> {
             _marker: std::marker::PhantomData,
         }
     }
+
+    pub fn insert(&mut self, index: usize, key: Option<&[u8]>, page_id: PageId) {
+        if let Some(key_val) = key {
+            self.shift_right(index);
+            // Initialize cell data using provided function
+            let cell_size = self.header_mut().cell_size() as usize;
+            let offset = self.as_view().cell_offset(index).unwrap();
+            let cell_data = &mut self.page.data_mut()[offset..offset + cell_size];
+
+            // Serialize key and page_id into cell
+            cell_data[..key_val.len()].copy_from_slice(key_val);
+            cell_data[key_val.len()..key_val.len() + 4].copy_from_slice(&page_id.to_le_bytes());
+        } else {
+            // Special case for first pointer (no key)
+            let cell_size = self.header_mut().cell_size() as usize;
+            let key_size = cell_size - size_of::<PageId>();
+
+            let cell = self.cell_at_mut(0).unwrap();
+            cell[key_size..key_size + 4].copy_from_slice(&page_id.to_le_bytes());
+        }
+
+        // Update cell count
+        let header = self.header_mut();
+        header.cells += 1;
+    }
 }
 
 impl<'a> View<'a, Leaf> {
-    pub fn key_at(&self, index: usize) -> Option<&[u8]> {
+    pub fn key_at(&self, index: usize) -> Option<&'a [u8]> {
         let cell = self.cell_at(index)?;
-        let key_size = self.header().cell_size() as usize - 6;
+        let key_size = self.header().cell_size() - 6;
         Some(&cell[..key_size])
     }
 
     pub fn rid_at(&self, index: usize) -> Option<RID> {
         let cell = self.cell_at(index)?;
-        let key_size = self.header().cell_size() as usize - 6;
+        let key_size = self.header().cell_size() - 6;
         Some(RID::deserialize(&cell[key_size..key_size + 6]))
     }
 }
 
 impl<'a> View<'a, Internal> {
-    pub fn key_at(&self, index: usize) -> Option<&[u8]> {
+    pub fn key_at(&self, index: usize) -> Option<&'a [u8]> {
         let cell = self.cell_at(index)?;
-        let key_size = self.header().cell_size() as usize - size_of::<PageID>();
+        let key_size = self.header().cell_size() - size_of::<PageId>();
         Some(&cell[..key_size])
     }
 
-    pub fn page_id_at(&self, index: usize) -> Option<PageID> {
+    pub fn page_id_at(&self, index: usize) -> Option<PageId> {
         let cell = self.cell_at(index)?;
-        let key_size = self.header().cell_size() as usize - size_of::<PageID>();
-        Some(PageID::from_le_bytes(
+        let key_size = self.header().cell_size() - size_of::<PageId>();
+        Some(PageId::from_le_bytes(
             cell[key_size..key_size + 4].try_into().unwrap(),
         ))
     }

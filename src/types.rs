@@ -1,7 +1,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PageID(u32);
+pub struct PageId(u32);
 
-impl PageID {
+impl PageId {
     pub const fn new(id: u32) -> Self {
         Self(id)
     }
@@ -27,35 +27,35 @@ impl PageID {
     }
 }
 
-impl From<u32> for PageID {
+impl From<u32> for PageId {
     fn from(id: u32) -> Self {
         Self(id)
     }
 }
 
-impl From<usize> for PageID {
+impl From<usize> for PageId {
     fn from(id: usize) -> Self {
         Self(id as u32)
     }
 }
 
-impl std::fmt::Display for PageID {
+impl std::fmt::Display for PageId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum TypeID {
+pub enum TypeId {
     Int,
     BigInt,
 }
 
-impl TypeID {
+impl TypeId {
     pub fn size(&self) -> usize {
         match self {
-            TypeID::Int => 4,
-            TypeID::BigInt => 8,
+            TypeId::Int => 4,
+            TypeId::BigInt => 8,
         }
     }
 }
@@ -74,10 +74,10 @@ impl Value {
         }
     }
 
-    pub fn deserialize(type_id: TypeID, buf: &[u8]) -> Self {
+    pub fn deserialize(type_id: TypeId, buf: &[u8]) -> Self {
         match type_id {
-            TypeID::Int => Value::Int(i32::from_le_bytes(buf[..4].try_into().unwrap())),
-            TypeID::BigInt => Value::BigInt(i64::from_le_bytes(buf[..8].try_into().unwrap())),
+            TypeId::Int => Value::Int(i32::from_le_bytes(buf[..4].try_into().unwrap())),
+            TypeId::BigInt => Value::BigInt(i64::from_le_bytes(buf[..8].try_into().unwrap())),
         }
     }
 
@@ -86,6 +86,40 @@ impl Value {
             (Value::Int(a), Value::Int(b)) => a.cmp(b),
             (Value::BigInt(a), Value::BigInt(b)) => a.cmp(b),
             _ => panic!("Cannot compare different Value types"),
+        }
+    }
+}
+
+pub enum Key {
+    Int(i32),
+    BigInt(i64),
+}
+
+impl Key {
+    pub fn type_id(&self) -> TypeId {
+        match self {
+            Key::Int(_) => TypeId::Int,
+            Key::BigInt(_) => TypeId::BigInt,
+        }
+    }
+
+    pub fn size(&self) -> usize {
+        self.type_id().size()
+    }
+
+    // Order-Preserving Encoding
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            Key::Int(v) => {
+                // XOR with the sign bit mask to flip it
+                let flipped = *v ^ (1 << 31);
+                // Convert to big-endian bytes for lexicographical ordering
+                flipped.to_be_bytes().to_vec()
+            }
+            Key::BigInt(v) => {
+                let flipped = *v ^ (1 << 63);
+                flipped.to_be_bytes().to_vec()
+            }
         }
     }
 }

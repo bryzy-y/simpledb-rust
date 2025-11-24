@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SendError, SyncSender};
 
-use crate::types::PageID;
+use crate::types::PageId;
 
 use crate::config;
 use crate::storage::buffer::Frame;
@@ -49,15 +49,15 @@ pub struct DiskManager {
 
 pub enum DiskRequest {
     Read {
-        page_id: PageID,
+        page_id: PageId,
         frame: Arc<RwLock<Frame>>,
     },
     Write {
-        page_id: PageID,
+        page_id: PageId,
         frame: Arc<RwLock<Frame>>,
     },
     WriteUnsafe(*const [u8]),
-    Delete(PageID),
+    Delete(PageId),
 }
 
 unsafe impl Send for DiskRequest {}
