@@ -1,8 +1,9 @@
-use std::borrow::{Borrow, BorrowMut};
-
 use bytemuck::{Pod, Zeroable};
 
-use crate::{storage::page::Page, types::PageID};
+use crate::{
+    storage::page::Page,
+    types::{PageID, Value},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)] // We need it to be u32, because padding.
@@ -99,30 +100,29 @@ impl RID {
     }
 }
 
-pub struct Invalid;
 pub struct Leaf;
 pub struct Internal;
 
-pub struct Node<P, T> {
-    page: P,
+pub struct View<'a, T> {
+    page: &'a Page,
     _marker: std::marker::PhantomData<T>,
 }
 
-impl<P, T> Node<P, T> {
-    pub fn new(page: P) -> Self {
+pub struct Node<'a, T> {
+    page: &'a mut Page,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<'a, T> View<'a, T> {
+    pub fn new(page: &'a Page) -> Self {
         Self {
             page,
             _marker: std::marker::PhantomData,
         }
     }
-}
 
-impl<P, T> Node<P, T>
-where
-    P: Borrow<Page>,
-{
     pub fn header(&self) -> &PageHeader {
-        self.page.borrow().into()
+        self.page.into()
     }
 
     fn cell_offset(&self, index: usize) -> Option<usize> {
@@ -159,7 +159,7 @@ where
         let cell_size = self.header().cell_size() as usize;
 
         self.cell_offset(index).map(|off| {
-            let cell_data = &self.page.borrow().data()[off..off + cell_size];
+            let cell_data = &self.page.data()[off..off + cell_size];
             cell_data
         })
     }
@@ -190,43 +190,54 @@ where
     }
 }
 
-impl<P, T> Node<P, T>
-where
-    P: BorrowMut<Page>,
-{
+impl<'a, T> Node<'a, T> {
+    pub fn new(page: &'a mut Page) -> Self {
+        Self {
+            page,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn as_view(&'a self) -> View<'a, T> {
+        View::new(self.page)
+    }
+
     pub fn header_mut(&mut self) -> &mut PageHeader {
-        self.page.borrow_mut().into()
+        self.page.into()
     }
 
     pub fn shift_right(&mut self, cell_index: usize) {
-        let offset = self.cell_offset(cell_index).unwrap();
-        let cell_size = self.header().cell_size() as usize;
-        let end_offset = self.end_offset();
+        let view = self.as_view();
+        let offset = view.cell_offset(cell_index).unwrap();
+        let cell_size = view.header().cell_size() as usize;
+        let end_offset = view.end_offset();
 
-        let data = self.page.borrow_mut().data_mut();
+        let data = self.page.data_mut();
         data.copy_within(offset..end_offset, offset + cell_size);
     }
 
     pub fn shift_left(&mut self, cell_index: usize) {
-        let offset = self.cell_offset(cell_index).unwrap();
-        let cell_size = self.header().cell_size() as usize;
-        let end_offset = self.end_offset();
+        let view = self.as_view();
+        let offset = view.cell_offset(cell_index).unwrap();
+        let cell_size = view.header().cell_size() as usize;
+        let end_offset = view.end_offset();
 
-        let data = self.page.borrow_mut().data_mut();
+        let data = self.page.data_mut();
         data.copy_within(offset + cell_size..end_offset, offset);
     }
 
-    pub fn move_half(&mut self, other: &mut Node<P, T>) -> usize {
-        let header = self.header();
+    pub fn move_half(&mut self, other: &mut Node<'_, T>) -> usize {
+        let header = self.header_mut();
         let total_cells = header.cells() as usize;
         let mid_index = total_cells / 2 as usize;
 
-        let offset = self.cell_offset(mid_index).unwrap();
-        let end_offset = self.end_offset();
-        let other_offset = other.cell_offset(0).unwrap();
+        let view = self.as_view();
+        let offset = view.cell_offset(mid_index).unwrap();
+        let end_offset = view.end_offset();
+        let other_offset = other.as_view().cell_offset(0).unwrap();
 
-        let data = self.page.borrow_mut().data_mut();
-        let other_data = other.page.borrow_mut().data_mut();
+        let data = self.page.data_mut();
+        let other_data = other.page.data_mut();
         // Move the second half of the cells to the other page
         let src = &data[offset..end_offset];
         let dst = &mut other_data[other_offset..other_offset + src.len()];
@@ -246,9 +257,9 @@ where
         // Make room for the new cell
         self.shift_right(index);
         // Initialize cell data using provided function
-        let cell_size = self.header().cell_size() as usize;
-        let offset = self.cell_offset(index).unwrap();
-        let data = self.page.borrow_mut().data_mut();
+        let cell_size = self.header_mut().cell_size() as usize;
+        let offset = self.as_view().cell_offset(index).unwrap();
+        let data = self.page.data_mut();
         let cell_data = &mut data[offset..offset + cell_size];
         init(cell_data);
         // Update cell count
@@ -256,12 +267,9 @@ where
     }
 }
 
-impl<P> Node<P, Leaf>
-where
-    P: BorrowMut<Page>,
-{
-    pub fn init(mut page: P, max_cells: u32, cell_size: u32) -> Self {
-        let header: &mut PageHeader = page.borrow_mut().into();
+impl<'a> Node<'a, Leaf> {
+    pub fn init(page: &'a mut Page, max_cells: u32, cell_size: u32) -> Self {
+        let header: &mut PageHeader = page.into();
         header.max_cells = max_cells;
         header.cell_size = cell_size;
         header.cells = 0;
@@ -274,12 +282,9 @@ where
     }
 }
 
-impl<P> Node<P, Internal>
-where
-    P: BorrowMut<Page>,
-{
-    pub fn init(mut page: P, max_cells: u32, cell_size: u32) -> Self {
-        let header: &mut PageHeader = page.borrow_mut().into();
+impl<'a> Node<'a, Internal> {
+    pub fn init(page: &'a mut Page, max_cells: u32, cell_size: u32) -> Self {
+        let header: &mut PageHeader = page.into();
         header.max_cells = max_cells;
         header.cell_size = cell_size;
         header.cells = 0;
@@ -292,49 +297,66 @@ where
     }
 }
 
-impl<P> Node<P, Invalid>
-where
-    P: BorrowMut<Page>,
-{
-    fn init_leaf(self, max_cells: u32, cell_size: u32) -> Node<P, Leaf> {
-        Node::<P, Leaf>::init(self.page, max_cells, cell_size)
+impl<'a> View<'a, Leaf> {
+    pub fn key_at(&self, index: usize) -> Option<&[u8]> {
+        let cell = self.cell_at(index)?;
+        let key_size = self.header().cell_size() as usize - 6;
+        Some(&cell[..key_size])
     }
 
-    fn init_internal(self, max_cells: u32, cell_size: u32) -> Node<P, Internal> {
-        Node::<P, Internal>::init(self.page, max_cells, cell_size)
+    pub fn rid_at(&self, index: usize) -> Option<RID> {
+        let cell = self.cell_at(index)?;
+        let key_size = self.header().cell_size() as usize - 6;
+        Some(RID::deserialize(&cell[key_size..key_size + 6]))
     }
 }
 
-pub type LeafNode<P> = Node<P, Leaf>;
-pub type InternalNode<P> = Node<P, Internal>;
+impl<'a> View<'a, Internal> {
+    pub fn key_at(&self, index: usize) -> Option<&[u8]> {
+        let cell = self.cell_at(index)?;
+        let key_size = self.header().cell_size() as usize - size_of::<PageID>();
+        Some(&cell[..key_size])
+    }
 
-pub enum BtreeNode<P> {
-    Leaf(LeafNode<P>),
-    Internal(InternalNode<P>),
-    Invalid(Node<P, Invalid>),
+    pub fn page_id_at(&self, index: usize) -> Option<PageID> {
+        let cell = self.cell_at(index)?;
+        let key_size = self.header().cell_size() as usize - size_of::<PageID>();
+        Some(PageID::from_le_bytes(
+            cell[key_size..key_size + 4].try_into().unwrap(),
+        ))
+    }
 }
 
-impl<'a> From<&'a Page> for BtreeNode<&'a Page> {
+pub enum BtreeView<'a> {
+    Leaf(View<'a, Leaf>),
+    Internal(View<'a, Internal>),
+    Invalid,
+}
+
+pub enum BtreeNode<'a> {
+    Leaf(Node<'a, Leaf>),
+    Internal(Node<'a, Internal>),
+    Invalid,
+}
+
+impl<'a> From<&'a Page> for BtreeView<'a> {
     fn from(value: &'a Page) -> Self {
         let header: &PageHeader = value.into();
         match header.page_type() {
             PageType::Leaf => {
-                let node = Node::new(value);
-                BtreeNode::Leaf(node)
+                let node = View::new(value);
+                BtreeView::Leaf(node)
             }
             PageType::Internal => {
-                let node = Node::new(value);
-                BtreeNode::Internal(node)
+                let node = View::new(value);
+                BtreeView::Internal(node)
             }
-            PageType::Invalid => {
-                let node = Node::new(value);
-                BtreeNode::Invalid(node)
-            }
+            PageType::Invalid => BtreeView::Invalid,
         }
     }
 }
 
-impl<'a> From<&'a mut Page> for BtreeNode<&'a mut Page> {
+impl<'a> From<&'a mut Page> for BtreeNode<'a> {
     fn from(value: &'a mut Page) -> Self {
         let header: &mut PageHeader = value.into();
         match header.page_type() {
@@ -346,10 +368,7 @@ impl<'a> From<&'a mut Page> for BtreeNode<&'a mut Page> {
                 let node = Node::new(value);
                 BtreeNode::Internal(node)
             }
-            PageType::Invalid => {
-                let node = Node::new(value);
-                BtreeNode::Invalid(node)
-            }
+            PageType::Invalid => BtreeNode::Invalid,
         }
     }
 }
