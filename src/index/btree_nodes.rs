@@ -110,7 +110,7 @@ pub struct Node<'a, T> {
     _marker: std::marker::PhantomData<T>,
 }
 
-trait CommonNodeOps {
+trait NodeOps {
     fn page(&self) -> &Page;
     fn base_header(&self) -> &PageHeader;
 
@@ -200,7 +200,65 @@ trait CommonNodeOps {
     }
 }
 
-impl<'a, T> CommonNodeOps for View<'a, T> {
+trait NodeOpsMut: NodeOps {
+    fn page_mut(&mut self) -> &mut Page;
+    fn base_header_mut(&mut self) -> &mut PageHeader;
+
+    fn cell_at_mut(&mut self, index: usize) -> Option<&mut [u8]> {
+        let cell_size = self.base_header().cell_size() as usize;
+
+        self.cell_offset(index).map(|off| {
+            let cell_data = &mut self.page_mut().data_mut()[off..off + cell_size];
+            cell_data
+        })
+    }
+
+    fn shift_right(&mut self, cell_index: usize) {
+        let offset = self.cell_offset(cell_index).unwrap();
+        let cell_size = self.base_header().cell_size() as usize;
+        let end_offset = self.end_offset();
+
+        let data = self.page_mut().data_mut();
+        data.copy_within(offset..end_offset, offset + cell_size);
+    }
+
+    fn shift_left(&mut self, cell_index: usize) {
+        let offset = self.cell_offset(cell_index).unwrap();
+        let cell_size = self.base_header().cell_size() as usize;
+        let end_offset = self.end_offset();
+
+        let data = self.page_mut().data_mut();
+        data.copy_within(offset + cell_size..end_offset, offset);
+    }
+
+    fn move_half(&mut self, other: &mut impl NodeOpsMut) -> usize {
+        let header = self.base_header_mut();
+        let total_cells = header.cells() as usize;
+        let mid_index = total_cells / 2 as usize;
+
+        let offset = self.cell_offset(mid_index).unwrap();
+        let end_offset = self.end_offset();
+        let other_offset = other.cell_offset(0).unwrap();
+
+        let data = self.page_mut().data_mut();
+        let other_data = other.page_mut().data_mut();
+        // Move the second half of the cells to the other page
+        let src = &data[offset..end_offset];
+        let dst = &mut other_data[other_offset..other_offset + src.len()];
+        dst.copy_from_slice(src);
+
+        // Update sizes
+        let self_header = self.base_header_mut();
+        let other_header = other.base_header_mut();
+
+        self_header.cells = mid_index as u32;
+        other_header.cells = (total_cells - mid_index) as u32;
+
+        mid_index
+    }
+}
+
+impl<'a, T> NodeOps for View<'a, T> {
     fn page(&self) -> &'a Page {
         self.page
     }
@@ -210,13 +268,23 @@ impl<'a, T> CommonNodeOps for View<'a, T> {
     }
 }
 
-impl<'a, T> CommonNodeOps for Node<'a, T> {
+impl<'a, T> NodeOps for Node<'a, T> {
     fn page(&self) -> &Page {
         self.page
     }
 
     fn base_header(&self) -> &PageHeader {
         (&*self.page).into()
+    }
+}
+
+impl<'a, T> NodeOpsMut for Node<'a, T> {
+    fn page_mut(&mut self) -> &mut Page {
+        self.page
+    }
+
+    fn base_header_mut(&mut self) -> &mut PageHeader {
+        (&mut *self.page).into()
     }
 }
 
@@ -233,39 +301,39 @@ impl<'a, T> View<'a, T> {
     }
 
     pub fn bisect_right(&self, key: &[u8]) -> usize {
-        CommonNodeOps::bisect_right(self, key)
+        NodeOps::bisect_right(self, key)
     }
 
     pub fn is_full(&self) -> bool {
-        CommonNodeOps::is_full(self)
+        NodeOps::is_full(self)
     }
 
     pub fn is_empty(&self) -> bool {
-        CommonNodeOps::is_empty(self)
+        NodeOps::is_empty(self)
     }
 
     pub fn is_leaf(&self) -> bool {
-        CommonNodeOps::is_leaf(self)
+        NodeOps::is_leaf(self)
     }
 }
 
 impl<'a> View<'a, Leaf> {
     pub fn key_at(&self, index: usize) -> Option<&[u8]> {
-        CommonNodeOps::key_at(self, index)
+        NodeOps::key_at(self, index)
     }
 
     pub fn rid_at(&self, index: usize) -> Option<RID> {
-        CommonNodeOps::rid_at(self, index)
+        NodeOps::rid_at(self, index)
     }
 }
 
 impl<'a> View<'a, Internal> {
     pub fn key_at(&self, index: usize) -> Option<&[u8]> {
-        CommonNodeOps::key_at(self, index)
+        NodeOps::key_at(self, index)
     }
 
     pub fn page_id_at(&self, index: usize) -> Option<PageId> {
-        CommonNodeOps::page_id_at(self, index)
+        NodeOps::page_id_at(self, index)
     }
 }
 
@@ -282,72 +350,19 @@ impl<'a, T> Node<'a, T> {
     }
 
     pub fn bisect_right(&self, key: &[u8]) -> usize {
-        CommonNodeOps::bisect_right(self, key)
+        NodeOps::bisect_right(self, key)
     }
 
     pub fn is_full(&self) -> bool {
-        CommonNodeOps::is_full(self)
+        NodeOps::is_full(self)
     }
 
     pub fn is_empty(&self) -> bool {
-        CommonNodeOps::is_empty(self)
+        NodeOps::is_empty(self)
     }
 
     pub fn is_leaf(&self) -> bool {
-        CommonNodeOps::is_leaf(self)
-    }
-
-    fn cell_at_mut(&mut self, index: usize) -> Option<&mut [u8]> {
-        let cell_size = self.base_header().cell_size() as usize;
-
-        self.cell_offset(index).map(|off| {
-            let cell_data = &mut self.page.data_mut()[off..off + cell_size];
-            cell_data
-        })
-    }
-
-    fn shift_right(&mut self, cell_index: usize) {
-        let offset = self.cell_offset(cell_index).unwrap();
-        let cell_size = self.base_header().cell_size() as usize;
-        let end_offset = self.end_offset();
-
-        let data = self.page.data_mut();
-        data.copy_within(offset..end_offset, offset + cell_size);
-    }
-
-    fn shift_left(&mut self, cell_index: usize) {
-        let offset = self.cell_offset(cell_index).unwrap();
-        let cell_size = self.base_header().cell_size() as usize;
-        let end_offset = self.end_offset();
-
-        let data = self.page.data_mut();
-        data.copy_within(offset + cell_size..end_offset, offset);
-    }
-
-    pub fn move_half(&mut self, other: &mut Node<'_, T>) -> usize {
-        let header = self.header_mut();
-        let total_cells = header.cells() as usize;
-        let mid_index = total_cells / 2 as usize;
-
-        let offset = self.cell_offset(mid_index).unwrap();
-        let end_offset = self.end_offset();
-        let other_offset = other.cell_offset(0).unwrap();
-
-        let data = self.page.data_mut();
-        let other_data = other.page.data_mut();
-        // Move the second half of the cells to the other page
-        let src = &data[offset..end_offset];
-        let dst = &mut other_data[other_offset..other_offset + src.len()];
-        dst.copy_from_slice(src);
-
-        // Update sizes
-        let self_header = self.header_mut();
-        let other_header = other.header_mut();
-
-        self_header.cells = mid_index as u32;
-        other_header.cells = (total_cells - mid_index) as u32;
-
-        mid_index
+        NodeOps::is_leaf(self)
     }
 }
 
@@ -387,11 +402,15 @@ impl<'a> Node<'a, Leaf> {
     }
 
     pub fn key_at(&self, index: usize) -> Option<&[u8]> {
-        CommonNodeOps::key_at(self, index)
+        NodeOps::key_at(self, index)
     }
 
     pub fn rid_at(&self, index: usize) -> Option<RID> {
-        CommonNodeOps::rid_at(self, index)
+        NodeOps::rid_at(self, index)
+    }
+
+    pub fn move_half(&mut self, other: &mut Node<'_, Leaf>) -> usize {
+        NodeOpsMut::move_half(self, other)
     }
 }
 
@@ -435,11 +454,15 @@ impl<'a> Node<'a, Internal> {
     }
 
     pub fn key_at(&self, index: usize) -> Option<&[u8]> {
-        CommonNodeOps::key_at(self, index)
+        NodeOps::key_at(self, index)
     }
 
     pub fn page_id_at(&self, index: usize) -> Option<PageId> {
-        CommonNodeOps::page_id_at(self, index)
+        NodeOps::page_id_at(self, index)
+    }
+
+    pub fn move_half(&mut self, other: &mut Node<'_, Internal>) -> usize {
+        NodeOpsMut::move_half(self, other)
     }
 }
 
