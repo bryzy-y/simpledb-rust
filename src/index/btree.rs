@@ -100,9 +100,9 @@ impl<P: Pager> Btree<P> {
         let mut leaf = Node::<Leaf>::new(guard.page_mut());
 
         // Check for duplicate keys
-        let insert_idx = leaf.as_view().bisect_right(key);
+        let insert_idx = leaf.bisect_right(key);
 
-        if insert_idx > 0 && leaf.as_view().key_at(insert_idx - 1) == Some(key) {
+        if insert_idx > 0 && leaf.key_at(insert_idx - 1) == Some(key) {
             // Key already exists, do not insert duplicates
             // Maybe return an error
             return;
@@ -110,7 +110,7 @@ impl<P: Pager> Btree<P> {
         // Insert the new key+rid into the leaf
         leaf.insert(insert_idx, key, rid);
 
-        if !leaf.as_view().is_full() {
+        if !leaf.is_full() {
             // No overflow, done
             return;
         }
@@ -126,7 +126,7 @@ impl<P: Pager> Btree<P> {
 
         // Move half the cells to the new leaf page
         leaf.move_half(&mut new_leaf);
-        let mut middle_key = new_leaf.as_view().key_at(0).unwrap().to_owned();
+        let mut middle_key = new_leaf.key_at(0).unwrap().to_owned();
 
         // Iterate over page_ids parent stack to handle splits
         while let Some(parent_page_id) = parent_page_ids.pop() {
@@ -134,10 +134,10 @@ impl<P: Pager> Btree<P> {
             // If overflow occurs, split, get a new key and page link to insert into the next parent
             let mut guard = self.pager.get_page_mut(parent_page_id).unwrap();
             let mut parent = Node::<Internal>::new(guard.page_mut());
-            let insert_idx = parent.as_view().bisect_right(&middle_key);
+            let insert_idx = parent.bisect_right(&middle_key);
 
             // Check if internal node is full before inserting
-            if parent.as_view().is_full() {
+            if parent.is_full() {
                 let new_internal_id = self.pager.new_page() as PageId;
                 let mut guard = self.pager.get_page_mut(new_internal_id).unwrap();
 
@@ -150,7 +150,7 @@ impl<P: Pager> Btree<P> {
                 let split_idx = parent.move_half(&mut new_internal);
                 // After move_half, the right page's cell 0 contains a key+pageID that should be promoted
                 // Extract the key before inserting the new entry
-                let promote_key = new_internal.as_view().key_at(0).unwrap().to_owned();
+                let promote_key = new_internal.key_at(0).unwrap().to_owned();
 
                 if insert_idx < split_idx {
                     // Insert into left page
