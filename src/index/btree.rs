@@ -1,5 +1,5 @@
 use crate::{
-    index::btree_nodes::{BtreeView, Internal, Leaf, Node, PageHeader, RID},
+    index::btree_nodes::{BtreeView, InternalNode, LeafNode, PageHeader, RID},
     storage::page::{Guard, GuardMut, Pager},
     types::{Key, PageId, TypeId},
 };
@@ -87,7 +87,7 @@ impl<P: Pager> Btree<P> {
                     drop(guard); // Release read lock
                     let mut guard = self.pager.get_page_mut(page_id).unwrap();
 
-                    Node::<Leaf>::init(
+                    LeafNode::init(
                         guard.page_mut(),
                         self.max_cells_per_page as u32,
                         (self.key_type.size() + 6) as u32,
@@ -97,7 +97,7 @@ impl<P: Pager> Btree<P> {
             }
         };
         let mut guard = self.pager.get_page_mut(leaf_page_id).unwrap();
-        let mut leaf = Node::<Leaf>::new(guard.page_mut());
+        let leaf: &mut LeafNode = guard.page_mut().into();
 
         // Check for duplicate keys
         let insert_idx = leaf.bisect_right(key);
@@ -118,7 +118,7 @@ impl<P: Pager> Btree<P> {
         let mut new_page_id = self.pager.new_page() as PageId;
         let mut guard = self.pager.get_page_mut(new_page_id).unwrap();
 
-        let mut new_leaf = Node::<Leaf>::init(
+        let mut new_leaf = LeafNode::init(
             guard.page_mut(),
             self.max_cells_per_page as u32,
             (self.key_type.size() + 6) as u32,
@@ -133,7 +133,7 @@ impl<P: Pager> Btree<P> {
             // Try insert into an internal page
             // If overflow occurs, split, get a new key and page link to insert into the next parent
             let mut guard = self.pager.get_page_mut(parent_page_id).unwrap();
-            let mut parent = Node::<Internal>::new(guard.page_mut());
+            let parent: &mut InternalNode = guard.page_mut().into();
             let insert_idx = parent.bisect_right(&middle_key);
 
             // Check if internal node is full before inserting
@@ -141,7 +141,7 @@ impl<P: Pager> Btree<P> {
                 let new_internal_id = self.pager.new_page() as PageId;
                 let mut guard = self.pager.get_page_mut(new_internal_id).unwrap();
 
-                let mut new_internal = Node::<Internal>::init(
+                let mut new_internal = InternalNode::init(
                     guard.page_mut(),
                     self.max_cells_per_page as u32,
                     (self.key_type.size() + 4) as u32,
@@ -171,7 +171,7 @@ impl<P: Pager> Btree<P> {
         let new_root_id = self.pager.new_page() as PageId;
         let mut guard = self.pager.get_page_mut(new_root_id).unwrap();
 
-        let mut new_root = Node::<Internal>::init(
+        let new_root = InternalNode::init(
             guard.page_mut(),
             self.max_cells_per_page as u32,
             (self.key_type.size() + size_of::<PageId>()) as u32,
