@@ -25,7 +25,7 @@ impl<P: Pager> Btree<P> {
     pub fn is_empty(&self) -> bool {
         let guard = self.pager.get_page(self.root_page_id).unwrap();
         let header: &PageHeader = guard.page().into();
-        header.cells() == 0
+        header.is_empty()
     }
 
     // Additional B-Tree methods (insert, delete, search, etc.) would go here
@@ -91,6 +91,7 @@ impl<P: Pager> Btree<P> {
                         guard.page_mut(),
                         self.max_cells_per_page as u32,
                         (self.key_type.size() + 6) as u32,
+                        None,
                     );
                     break page_id;
                 }
@@ -110,7 +111,7 @@ impl<P: Pager> Btree<P> {
         // Insert the new key+rid into the leaf
         leaf.insert(insert_idx, key, rid);
 
-        if !leaf.is_full() {
+        if !leaf.header().is_full() {
             // No overflow, done
             return;
         }
@@ -122,10 +123,13 @@ impl<P: Pager> Btree<P> {
             guard.page_mut(),
             self.max_cells_per_page as u32,
             (self.key_type.size() + 6) as u32,
+            leaf.next_leaf(),
         );
 
         // Move half the cells to the new leaf page
         leaf.move_half(&mut new_leaf);
+        leaf.set_next_leaf(new_page_id);
+
         let mut middle_key = new_leaf.key_at(0).unwrap().to_owned();
 
         // Iterate over page_ids parent stack to handle splits
@@ -137,7 +141,7 @@ impl<P: Pager> Btree<P> {
             let insert_idx = parent.bisect_right(&middle_key);
 
             // Check if internal node is full before inserting
-            if parent.is_full() {
+            if parent.header().is_full() {
                 let new_internal_id = self.pager.new_page() as PageId;
                 let mut guard = self.pager.get_page_mut(new_internal_id).unwrap();
 
@@ -183,6 +187,86 @@ impl<P: Pager> Btree<P> {
 
         // Update BTree root_page_id. Have to persist the new root
         self.root_page_id = new_root_id;
+    }
+
+    pub fn iter(&self) -> BtreeIterator<'_, P> {
+        let mut iterator = BtreeIterator::new(self);
+        iterator.seek_to_first();
+        iterator
+    }
+}
+
+pub struct BtreeIterator<'a, P: Pager> {
+    btree: &'a Btree<P>,
+    current_page_id: Option<PageId>,
+    current_index: usize,
+}
+
+impl<'a, P: Pager> BtreeIterator<'a, P> {
+    pub fn new(btree: &'a Btree<P>) -> Self {
+        let root_guard = btree.pager.get_page(btree.root_page_id).unwrap();
+        let header: &PageHeader = root_guard.page().into();
+
+        let current_page_id = if header.is_empty() {
+            None
+        } else {
+            Some(btree.root_page_id)
+        };
+
+        Self {
+            btree,
+            current_page_id,
+            current_index: 0,
+        }
+    }
+
+    fn seek_to_first(&mut self) {
+        let mut page_id = self.btree.root_page_id;
+        let mut guard = self.btree.pager.get_page(page_id).unwrap();
+        let mut current_view: BtreeView = guard.page().into();
+
+        while let BtreeView::Internal(ref internal) = current_view {
+            let first_child_page_id = internal.page_id_at(0).unwrap();
+            page_id = first_child_page_id;
+            guard = self.btree.pager.get_page(page_id).unwrap();
+            current_view = guard.page().into();
+        }
+
+        match current_view {
+            BtreeView::Leaf(_) => self.current_page_id = Some(page_id),
+            _ => self.current_page_id = None,
+        }
+    }
+}
+
+impl<'a, P: Pager> Iterator for BtreeIterator<'a, P> {
+    type Item = (Key, RID);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(page_id) = self.current_page_id {
+            let guard = self.btree.pager.get_page(page_id).unwrap();
+            let leaf: &LeafNode = guard.page().into();
+
+            if leaf.header().is_empty() {
+                self.current_page_id = None;
+                return None;
+            }
+
+            if self.current_index >= leaf.header().cells() {
+                // Move to next leaf page
+                self.current_page_id = leaf.next_leaf();
+                self.current_index = 0;
+                return self.next();
+            }
+            // For simplicity, return the first key-rid pair and move to next page
+            let key = leaf.key_at(self.current_index).unwrap();
+            let rid = leaf.rid_at(self.current_index).unwrap();
+            self.current_index += 1;
+
+            Some((Key::from_bytes(self.btree.key_type, &key), rid))
+        } else {
+            None
+        }
     }
 }
 
@@ -429,5 +513,162 @@ mod tests {
         assert_eq!(btree.search(&Key::Int(15)), None);
         assert_eq!(btree.search(&Key::Int(95)), None);
         assert_eq!(btree.search(&Key::Int(999)), None);
+    }
+
+    /// Test 8: Iterator on empty tree
+    #[test]
+    fn test_iter_empty_tree() {
+        let bpm = MockBufferPoolManager::new();
+        let btree = Btree::new(TypeId::Int, bpm, 10);
+
+        let items: Vec<_> = btree.iter().collect();
+        assert!(items.is_empty(), "Empty tree should yield no items");
+    }
+
+    /// Test 9: Iterator on single element
+    #[test]
+    fn test_iter_single_element() {
+        let bpm = MockBufferPoolManager::new();
+        let mut btree = Btree::new(TypeId::Int, bpm, 10);
+
+        let rid = RID::new(PageId::from(1u32), 10);
+        btree.insert(Key::Int(42), rid);
+
+        let items: Vec<_> = btree.iter().collect();
+        assert_eq!(items.len(), 1, "Should have exactly one item");
+
+        match &items[0].0 {
+            Key::Int(k) => assert_eq!(*k, 42),
+            _ => panic!("Expected Int key"),
+        }
+        assert_eq!(items[0].1, rid);
+    }
+
+    /// Test 10: Iterator returns items in sorted order
+    #[test]
+    fn test_iter_sorted_order() {
+        let bpm = MockBufferPoolManager::new();
+        let mut btree = Btree::new(TypeId::Int, bpm, 5);
+
+        // Insert keys out of order
+        let keys = vec![50, 20, 80, 10, 40, 90, 30, 70, 60];
+        for (i, &k) in keys.iter().enumerate() {
+            btree.insert(Key::Int(k), RID::new(PageId::from(i as u32), i as u16));
+        }
+
+        let items: Vec<_> = btree.iter().collect();
+        assert_eq!(items.len(), keys.len(), "Should have all items");
+
+        // Extract keys and verify they are sorted
+        let result_keys: Vec<i32> = items
+            .iter()
+            .map(|(k, _)| match k {
+                Key::Int(v) => *v,
+                _ => panic!("Expected Int key"),
+            })
+            .collect();
+
+        let mut expected = keys.clone();
+        expected.sort();
+
+        assert_eq!(
+            result_keys, expected,
+            "Iterator should return keys in sorted order"
+        );
+    }
+
+    /// Test 11: Iterator across multiple leaf pages (after splits)
+    #[test]
+    fn test_iter_multiple_leaves() {
+        let bpm = MockBufferPoolManager::new();
+        let max_cells = 3;
+        let mut btree = Btree::new(TypeId::Int, bpm, max_cells);
+
+        // Insert enough to cause multiple splits
+        let num_keys = 45;
+        for i in 0..num_keys {
+            btree.insert(
+                Key::Int((i * 10) as i32),
+                RID::new(PageId::from(i as u32), i as u16),
+            );
+        }
+
+        let items: Vec<_> = btree.iter().collect();
+        assert_eq!(items.len(), num_keys, "Should have all {} items", num_keys);
+
+        // Verify sorted order
+        for (idx, (key, rid)) in items.iter().enumerate() {
+            let expected_key = (idx * 10) as i32;
+            match key {
+                Key::Int(k) => assert_eq!(
+                    *k, expected_key,
+                    "Key at index {} should be {}",
+                    idx, expected_key
+                ),
+                _ => panic!("Expected Int key"),
+            }
+            assert_eq!(rid.page_id, PageId::from(idx as u32));
+            assert_eq!(rid.slot_num, idx as u16);
+        }
+    }
+
+    /// Test 14: Iterator can be used multiple times
+    #[test]
+    fn test_iter_reusable() {
+        let bpm = MockBufferPoolManager::new();
+        let mut btree = Btree::new(TypeId::Int, bpm, 5);
+
+        for i in 0..10 {
+            btree.insert(Key::Int(i), RID::new(PageId::from(i as u32), i as u16));
+        }
+
+        // First iteration
+        let items1: Vec<_> = btree.iter().collect();
+
+        // Second iteration
+        let items2: Vec<_> = btree.iter().collect();
+
+        assert_eq!(
+            items1.len(),
+            items2.len(),
+            "Both iterations should return same count"
+        );
+
+        for (a, b) in items1.iter().zip(items2.iter()) {
+            assert_eq!(a.1, b.1, "Both iterations should return same items");
+        }
+    }
+
+    /// Test 15: Iterator with for loop
+    #[test]
+    fn test_iter_for_loop() {
+        let bpm = MockBufferPoolManager::new();
+        let mut btree = Btree::new(TypeId::Int, bpm, 4);
+
+        for i in 0..8 {
+            btree.insert(
+                Key::Int(i * 100),
+                RID::new(PageId::from(i as u32), i as u16),
+            );
+        }
+
+        let mut count = 0;
+        let mut prev_key: Option<i32> = None;
+
+        for (key, _rid) in btree.iter() {
+            let k = match key {
+                Key::Int(v) => v,
+                _ => panic!("Expected Int key"),
+            };
+
+            // Verify ascending order
+            if let Some(prev) = prev_key {
+                assert!(k > prev, "Keys should be strictly ascending");
+            }
+            prev_key = Some(k);
+            count += 1;
+        }
+
+        assert_eq!(count, 8, "Should iterate over all 8 items");
     }
 }

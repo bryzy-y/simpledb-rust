@@ -1,4 +1,5 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
 pub struct PageId(u32);
 
 impl PageId {
@@ -105,6 +106,21 @@ impl Key {
 
     pub fn size(&self) -> usize {
         self.type_id().size()
+    }
+
+    pub fn from_bytes(type_id: TypeId, bytes: &[u8]) -> Self {
+        match type_id {
+            TypeId::Int => {
+                let mut arr = [0u8; 4];
+                arr.copy_from_slice(&bytes[..4]);
+                Key::Int(i32::from_be_bytes(arr) ^ (1 << 31))
+            }
+            TypeId::BigInt => {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&bytes[..8]);
+                Key::BigInt(i64::from_be_bytes(arr) ^ (1 << 63))
+            }
+        }
     }
 
     // Order-Preserving Encoding

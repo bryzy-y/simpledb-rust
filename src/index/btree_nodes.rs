@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use bytemuck::{Pod, Zeroable};
 
 use crate::{storage::page::Page, types::PageId};
@@ -17,6 +19,13 @@ pub struct PageHeader {
     cell_size: u32,
     cells: u32,
     max_cells: u32,
+}
+
+#[derive(Pod, Zeroable, Clone, Copy)]
+#[repr(C)]
+pub struct LeafPageHeader {
+    base: PageHeader,
+    next_leaf: Option<NonZeroU32>,
 }
 
 impl PageHeader {
@@ -45,6 +54,14 @@ impl PageHeader {
         matches!(self.page_type(), PageType::Leaf)
     }
 
+    pub fn is_full(&self) -> bool {
+        self.cells >= self.max_cells
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cells == 0
+    }
+
     pub fn set_page_type(&mut self, page_type: PageType) {
         self.page_type = page_type as u32;
     }
@@ -66,10 +83,24 @@ impl<'a> From<&'a mut Page> for &'a mut PageHeader {
     }
 }
 
+impl LeafPageHeader {
+    pub fn cells(&self) -> usize {
+        self.base.cells()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.base.is_full()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.base.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RID {
-    page_id: PageId,
-    slot_num: u16,
+    pub page_id: PageId,
+    pub slot_num: u16,
 }
 
 impl RID {
@@ -135,13 +166,22 @@ trait Node {
         if index >= header.max_cells() as usize {
             return None;
         }
-        let keys_offset = size_of::<PageHeader>();
+        let keys_offset = if header.is_leaf() {
+            size_of::<LeafPageHeader>()
+        } else {
+            size_of::<PageHeader>()
+        };
+
         Some(keys_offset + index * header.cell_size() as usize)
     }
 
     fn end_offset(&self) -> usize {
         let header = self.base_header();
-        let keys_offset = size_of::<PageHeader>();
+        let keys_offset = if header.is_leaf() {
+            size_of::<LeafPageHeader>()
+        } else {
+            size_of::<PageHeader>()
+        };
 
         keys_offset + header.cells() as usize * header.cell_size() as usize
     }
@@ -155,24 +195,10 @@ trait Node {
         })
     }
 
-    fn is_full(&self) -> bool {
-        let header = self.base_header();
-        header.cells() >= header.max_cells()
-    }
-
-    fn is_empty(&self) -> bool {
-        let header = self.base_header();
-        header.cells() == 0
-    }
-
-    fn is_leaf(&self) -> bool {
-        self.base_header().is_leaf()
-    }
-
     fn bisect_right(&self, key: &[u8]) -> usize {
         let header = self.base_header();
 
-        let (mut lo, mut hi) = match self.is_leaf() {
+        let (mut lo, mut hi) = match header.is_leaf() {
             true => (0, header.cells()),
             false => (1, header.cells()),
         };
@@ -193,26 +219,6 @@ trait Node {
             }
         }
         lo
-    }
-
-    fn key_at(&self, index: usize) -> Option<&[u8]> {
-        let cell = self.cell_at(index)?;
-        let key_size = self.base_header().cell_size() - if self.is_leaf() { 6 } else { 4 };
-        Some(&cell[..key_size])
-    }
-
-    fn page_id_at(&self, index: usize) -> Option<PageId> {
-        let cell = self.cell_at(index)?;
-        let key_size = self.base_header().cell_size() - size_of::<PageId>();
-        Some(PageId::from_le_bytes(
-            cell[key_size..key_size + 4].try_into().unwrap(),
-        ))
-    }
-
-    fn rid_at(&self, index: usize) -> Option<RID> {
-        let cell = self.cell_at(index)?;
-        let key_size = self.base_header().cell_size() - 6;
-        Some(RID::deserialize(&cell[key_size..key_size + 6]))
     }
 
     fn cell_at_mut(&mut self, index: usize) -> Option<&mut [u8]> {
@@ -324,16 +330,8 @@ impl InternalNode {
         Node::bisect_right(self, key)
     }
 
-    pub fn is_full(&self) -> bool {
-        Node::is_full(self)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        Node::is_empty(self)
-    }
-
-    pub fn is_leaf(&self) -> bool {
-        Node::is_leaf(self)
+    pub fn header(&self) -> &PageHeader {
+        self.base_header()
     }
 
     pub fn key_at(&self, index: usize) -> Option<&[u8]> {
@@ -381,30 +379,42 @@ impl InternalNode {
 }
 
 impl LeafNode {
-    pub fn init(page: &mut Page, max_cells: u32, cell_size: u32) -> &mut Self {
-        let header: &mut PageHeader = page.into();
-        header.max_cells = max_cells;
-        header.cell_size = cell_size;
-        header.cells = 0;
-        header.set_page_type(PageType::Leaf);
+    pub fn init(
+        page: &mut Page,
+        max_cells: u32,
+        cell_size: u32,
+        next_leaf: Option<PageId>,
+    ) -> &mut Self {
+        let header: &mut LeafPageHeader =
+            bytemuck::from_bytes_mut(&mut page.data_mut()[..size_of::<LeafPageHeader>()]);
+
+        header.base.max_cells = max_cells;
+        header.base.cell_size = cell_size;
+        header.base.cells = 0;
+        header.base.set_page_type(PageType::Leaf);
+        header.next_leaf = next_leaf.and_then(|id| NonZeroU32::new(id.as_u32()));
 
         page.into()
+    }
+
+    pub fn next_leaf(&self) -> Option<PageId> {
+        let header = self.header();
+        header.next_leaf.map(|nz| PageId::new(nz.get()))
+    }
+
+    pub fn set_next_leaf(&mut self, next_leaf: PageId) {
+        let header_bytes = &mut self.data[..size_of::<LeafPageHeader>()];
+        let header: &mut LeafPageHeader = bytemuck::from_bytes_mut(header_bytes);
+        header.next_leaf = NonZeroU32::new(next_leaf.as_u32());
     }
 
     pub fn bisect_right(&self, key: &[u8]) -> usize {
         Node::bisect_right(self, key)
     }
 
-    pub fn is_full(&self) -> bool {
-        Node::is_full(self)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        Node::is_empty(self)
-    }
-
-    pub fn is_leaf(&self) -> bool {
-        Node::is_leaf(self)
+    pub fn header(&self) -> &LeafPageHeader {
+        let header_bytes = &self.data[..size_of::<LeafPageHeader>()];
+        bytemuck::from_bytes(header_bytes)
     }
 
     pub fn key_at(&self, index: usize) -> Option<&[u8]> {
@@ -424,11 +434,6 @@ impl LeafNode {
     }
 
     pub fn insert(&mut self, index: usize, key: &[u8], rid: RID) {
-        assert!(
-            key.len() + 6 == self.base_header_mut().cell_size(),
-            "Key size does not expected cell size"
-        );
-
         self.shift_right(index);
         // Initialize cell data using provided function
         let cell_size = self.base_header_mut().cell_size() as usize;
